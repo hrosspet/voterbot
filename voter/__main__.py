@@ -16,7 +16,7 @@ RUN_ID = datetime.strftime(datetime.utcnow(), '%Y%m%d%H%M%S')
 def parse_arguments():
     from steevebase import run_downloader
     from voter.model import run_trainer
-    from voter import run_voter, run_wrangler
+    from voter import run_bidbot, run_voter, run_wrangler
 
     parser = argparse.ArgumentParser(
         prog='voterbot',
@@ -146,6 +146,24 @@ def parse_arguments():
                               help="Mongo address to the db with past vote times and blacklist",
                               default="mongodb://107.155.87.82:26999")
     voter_parser.set_defaults(func=run_voter)
+
+    bidbot_parser = subparsers.add_parser(
+        name='bidbot', help='Votes for posts on the blockchain',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    bidbot_parser.add_argument("-d",
+                               "--dry-run",
+                               help="Use bidbot for testing - no upvotes & no store to db",
+                               action="store_true")
+    bidbot_parser.add_argument("-s",
+                              "--steem-address",
+                              type=str,
+                              help="Steem address",
+                              default="")
+    bidbot_parser.add_argument("-db",
+                              "--db-address",
+                              help="Mongo address to the db with past vote times and blacklist",
+                              default="mongodb://107.155.87.82:26999")
+    bidbot_parser.set_defaults(func=run_bidbot)
 
 
     # if no arguments are passed, print help and exit
