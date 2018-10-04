@@ -1,0 +1,8 @@
+steem
+keras==2.0.2
+pymongo
+numpy
+scikit-learn
+h5py
+pandas
+steevebase

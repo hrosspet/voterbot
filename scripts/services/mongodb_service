@@ -1,0 +1,23 @@
+# mongodb service
+
+# How to use:
+# put this file into: sudo nano /etc/systemd/system/mongodb.service
+# systemctl start mongodb.service
+# check if running: ps ax | grep mongodb
+# kill & check again
+
+[Unit]
+Description=An object/document-oriented database
+Documentation=man:mongod(1)
+After=network.target
+
+[Service]
+#Type=forking
+User=mongodb
+#ExecStart=/usr/bin/mongod --fork --auth --port 26999 --dbpath /var/lib/mongodb
+ExecStart=/usr/bin/mongod --quiet --logpath "/var/log/mongodb/mongod.log" --auth --port 26999 --dbpath /var/lib/mongodb
+Restart=always
+TimeoutStartSec=10
+
+[Install]
+WantedBy=multi-user.target

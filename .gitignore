@@ -1,0 +1,13 @@
+src
+__pycache__
+.idea
+voter.egg-info
+data
+.cache
+*/.ipynb_checkpoints
+*.hdf5
+*.jsonl
+logs
+models
+zaloha
+dump

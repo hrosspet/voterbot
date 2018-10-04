@@ -1,0 +1,31 @@
+{
+  "MODEL": {
+    "OUTPUT_SIZE": 2,
+    "EMBEDDING_SIZE": 3,
+    "LSTM_HIDDEN_SIZE": 3,
+    "NUM_ATROUS_LAYERS": 10,
+    "CONVOLUTION": {
+      "FILTERS": 10,
+      "POOL_SIZE": 3,
+      "POOL_STRIDES": 3
+    }
+  },
+  "TRAINING": {
+    "SAVE_BEST_ONLY": false,
+    "STEPS_PER_EPOCH": 5,
+    "EPOCHS": 2,
+    "TEST_SAMPLES": 200,
+    "TEST2TRAIN_RATIO": 0.1,
+    "CLASS_WEIGHT": null,
+    "BATCH_SIZE": 8,
+    "LR": 0.00001,
+    "LOSS": "mse"
+  },
+  "DATA": {
+    "INPUT_DATA_NAME": "data/data.jsonl",
+    "TRAINING_STATS_NAME": "data/plot_data.npz",
+
+    "MAX_SEQ_LEN": 4096,
+    "ALPHABET": " abcdefghijklmnopqrstuvwxyz0123456789,;.!?:'\"/\\|_@#$%^&*~`+-=<>()[]{}"
+  }
+}
