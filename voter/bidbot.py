@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timedelta
 from steem.post import Post
 from steembase.exceptions import PostDoesNotExist, RPCErrorRecoverable, RPCError
-from steevebase.io import stream_ops
+from steevebase.io import stream_ops, save_data
 import time
 import pandas as pd
 import numpy as np
@@ -25,6 +25,7 @@ a_lock = allocate_lock()
 KNOWN_BIDBOTS = {x['_id'] for x in known_bidbots_col.find()}
 
 WIF = CONFIG['VOTER']["WIF"]
+PAST_VOTES = CONFIG['DATABASE']['PAST_VOTES_COLLECTION_NAME']
 
 N_ACCOUNTS = 1
 
@@ -74,6 +75,7 @@ def get_id(memo):
 def get_post(identifier, post_cache={}):
     try:
         post = Post(identifier)
+        post['_id'] = identifier
         post_cache[identifier] = post
         return post
     except Exception as e:
@@ -318,9 +320,9 @@ def _upvote_due_posts():
                                 'percent': percent,
                                 'voter': voter,
                                 'bid': bid,
-                                }
 
-                    save_data(self.db_address, PAST_VOTES, save_post)
+}
+                    save_data(mongo_address, PAST_VOTES, save_post)
 
 
     df_current_posts = df_current_posts.drop(clean_current_posts)
