@@ -1,5 +1,5 @@
 import logging
-
+from datetime import datetime, timedelta
 from steem.post import Post
 from steembase.exceptions import PostDoesNotExist, RPCErrorRecoverable, RPCError
 from steevebase.io import stream_ops
@@ -13,6 +13,8 @@ from steevebase.io import mongo_factory
 from voter.config import CONFIG
 
 mongo_address = CONFIG['DATABASE']['ADDRESS']
+TIME_FORMAT = CONFIG['TIME_FORMAT']
+
 db = mongo_factory(mongo_address)
 known_bidbots_col = db.get_collection('known_bidbots')
 
@@ -22,7 +24,7 @@ a_lock = allocate_lock()
 
 KNOWN_BIDBOTS = {x['_id'] for x in known_bidbots_col.find()}
 
-WIF = None
+WIF = CONFIG['VOTER']["WIF"]
 
 N_ACCOUNTS = 1
 
@@ -72,9 +74,10 @@ def get_id(memo):
 def get_post(identifier, post_cache={}):
     try:
         post = Post(identifier)
-        post_cache[post_id] = post
+        post_cache[identifier] = post
         return post
-    except:
+    except Exception as e:
+        # logger.exception(e)
         return None
 
 def get_post_from_transfer(transfer):
@@ -187,6 +190,7 @@ def bid_invalid(bid):
 
 def post_bid_invalid(post, bid):
     for check in CHECKS_POST_BID:
+        # print('check:', check.__name__, check(post, bid))
         if check(post, bid):
             return True
 
@@ -198,10 +202,11 @@ def get_expected_payout(amount):
     return value if currency == 'SBD' else value * STEEM_PRICE_USD / SBD_PRICE_USD
 
 def get_proportional_vote_strength(expected_payout, total_payouts, votes_per_day):
-    proportion = votes_per_day * MAX_PERCENT * expected_payout / total_payouts
+    return votes_per_day * MAX_PERCENT * expected_payout / total_payouts
 
+def round_percent(value):
     for i in range(N_ACCOUNTS):
-        percent = round(proportion * 10 ** i, 2)
+        percent = round(value * 10 ** i, 2)
 
         if percent > 10:
             break
@@ -209,16 +214,27 @@ def get_proportional_vote_strength(expected_payout, total_payouts, votes_per_day
     return percent, i
 
 def upvote_bid(post, bid, expected_payout):
+    global a_lock
     percent = get_proportional_vote_strength(expected_payout, TOTAL_PAYOUTS_SUM, N_VOTES)
 
     percent = MULTIPLIER * percent
+
+    percent, i = round_percent(percent)
+
+    if i != 0:
+        logger.info('\n\n\t!!!additional accounts not set!!!\n')
+
     percent = min(percent, 100)
 
     if vote_strength_ok(percent):
         # schedule for upvote
-        print('adding to upvote queue (%.2f%%, $%.2f): busy.org%s', (percent, expected_payout, post['url']))
         with a_lock:
-            _add_to_upvote_queue(post, percent, VOTER, bid)
+            pending_time = post['created'] + timedelta(seconds=VOTING_DELAY)
+            delay = (pending_time - datetime.utcnow()).total_seconds()
+
+            logger.info('  adding to upvote queue (%ds, %.2f%%, $%.2f): busy.org%s', delay, percent, expected_payout, post['url'])
+
+            _add_to_upvote_queue(post, percent, pending_time, VOTER, bid)
 
         # how much will we get from the vote?
 #         expected_reward = get_share(post, 'hr1', hrshares)[0]
@@ -229,14 +245,12 @@ def upvote_bid(post, bid, expected_payout):
 ######################################################################################################
 
 def _locking_upvote_cycle():
-        with a_lock:
-            _upvote_due_posts()
+    global a_lock
+    with a_lock:
+        _upvote_due_posts()
 
 
-def _add_to_upvote_queue(post, percent, voter, bid):
-    pending_time = post['created'] + timedelta(seconds=VOTING_DELAY)
-    delay = (pending_time - datetime.utcnow()).total_seconds()
-
+def _add_to_upvote_queue(post, percent, pending_time, voter, bid):
     # logger.info('Adding to upvote queue with delay: %d', delay)
     global df_current_posts
     df_current_posts = df_current_posts.append(
@@ -249,7 +263,8 @@ def _add_to_upvote_queue(post, percent, voter, bid):
         ignore_index=True)
 
 
-def _upvote_due_posts(self):
+def _upvote_due_posts():
+    global df_current_posts
     clean_current_posts = []
     for i, one_post_info in df_current_posts.iterrows():
         current_time = datetime.utcnow()
@@ -263,13 +278,12 @@ def _upvote_due_posts(self):
             clean_current_posts.append(i)
 
             if not post_bid_invalid(post, bid):
-                logger.info("$%.2f : " % float(post["pending_payout_value"]) + "busy.org" + post['url'])
-
                 created = datetime.strptime(str(post['created']), TIME_FORMAT)
-                age = (datetime.utcnow() - created).total_seconds()
+                # age = (datetime.utcnow() - created).total_seconds()
+                age = datetime.utcnow() - created
 
-                logger.info("%s: Upvoting (%s/%.2f%%): %s votes after %d: busy.org%s" % (
-                    current_time, voter, percent, post["net_votes"], age, post['url']))
+                logger.info("Upvoting (%s / %.2f%%): %s votes after [%s]: busy.org%s",
+                    voter, percent, post["net_votes"], age, post['url'])
 
                 retry_upvote = True
                 while retry_upvote:
@@ -313,9 +327,11 @@ def _upvote_due_posts(self):
 
 ######################################################################################################
 
+def transfer_to_str(transfer):
+    return " " + transfer['from'] + ' -> ' + transfer['to'] + \
+            ' (' + str(transfer['amount']) + ') ' + transfer['memo']
 
 def run(args):
-
     global DRY_RUN
     DRY_RUN = args.dry_run
     logger.info('\n\n\tDRY_RUN: %s\n', DRY_RUN)
@@ -343,10 +359,12 @@ def run(args):
         except (StopIteration, KeyError, RPCErrorRecoverable, RPCError) as e:
             logger.exception(e)
             time.sleep(BLOCK_INTERVAL)
-            stream = stream_ops('transfer', wif=None)
+            stream = stream_ops('transfer', wif=WIF)
             continue
 
         # save_data(self.db_address, RAW_POSTS_COLLECTION_NAME, post) # necessary for checking spam
+
+        # print('\ntransfer', transfer)
 
         if bid_invalid(transfer):
             continue
@@ -356,11 +374,11 @@ def run(args):
         if post_bid_invalid(post, transfer):
             continue
 
-        print('\nbid:', transfer)
+        logger.info(transfer_to_str(transfer))
 
         expected_payout = get_expected_payout(transfer['amount'])
 
         if expected_payout > 0:
-            upvote_bid(post, expected_payout)
+            upvote_bid(post, transfer, expected_payout)
 
-        start_new_thread(_locking_upvote_cycle)
+        start_new_thread(_locking_upvote_cycle, ())
