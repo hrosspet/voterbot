@@ -45,7 +45,7 @@ AUCTION_TIME = 15
 VOTING_DELAY = AUCTION_TIME * 60 - 10
 
 df_current_posts = pd.DataFrame({
-                        'post': [],
+                        'post': "",
                         'pending_times': [],
                         'percent': [],
                         'voter': [],
@@ -215,7 +215,7 @@ def round_percent(value):
 
     return percent, i
 
-def upvote_bid(post, bid, expected_payout):
+def process_bid(post, bid, expected_payout):
     global a_lock
     percent = get_proportional_vote_strength(expected_payout, TOTAL_PAYOUTS_SUM, N_VOTES)
 
@@ -234,7 +234,7 @@ def upvote_bid(post, bid, expected_payout):
             pending_time = post['created'] + timedelta(seconds=VOTING_DELAY)
             delay = (pending_time - datetime.utcnow()).total_seconds()
 
-            logger.info('  adding to upvote queue (%ds, %.2f%%, $%.2f): busy.org%s', delay, percent, expected_payout, post['url'])
+            logger.info(' adding to upvote queue (%ds, %.2f%%, $%.2f): busy.org%s', delay, percent, expected_payout, post['url'])
 
             _add_to_upvote_queue(post, percent, pending_time, VOTER, bid)
 
@@ -253,16 +253,23 @@ def _locking_upvote_cycle():
 
 
 def _add_to_upvote_queue(post, percent, pending_time, voter, bid):
-    # logger.info('Adding to upvote queue with delay: %d', delay)
     global df_current_posts
-    df_current_posts = df_current_posts.append(
-        {'pending_times': pending_time,
-         'post': post['identifier'],
-         'percent': percent,
-         'voter': voter,
-         'bid': bid
-         },
-        ignore_index=True)
+    pending_upvotes = df_current_posts[df_current_posts.post == post['identifier']]
+
+    if pending_upvotes.empty:
+        # add new upvote to queue
+        df_current_posts = df_current_posts.append(
+            {'pending_times': pending_time,
+             'post': post['identifier'],
+             'percent': percent,
+             'voter': voter,
+             'bid': bid
+             },
+            ignore_index=True)
+    else:
+        # update existing upvote
+        df_current_posts.loc[pending_upvotes.index[0], 'percent'] += percent
+
 
 
 def _upvote_due_posts():
@@ -284,7 +291,7 @@ def _upvote_due_posts():
                 # age = (datetime.utcnow() - created).total_seconds()
                 age = datetime.utcnow() - created
 
-                logger.info("Upvoting (%s / %.2f%%): %s votes after [%s]: busy.org%s",
+                logger.info("  Upvoting (%s / %.2f%%): %s votes after [%s]: busy.org%s",
                     voter, percent, post["net_votes"], age, post['url'])
 
                 retry_upvote = True
@@ -320,8 +327,7 @@ def _upvote_due_posts():
                                 'percent': percent,
                                 'voter': voter,
                                 'bid': bid,
-
-}
+                                }
                     save_data(mongo_address, PAST_VOTES, save_post)
 
 
@@ -330,7 +336,7 @@ def _upvote_due_posts():
 ######################################################################################################
 
 def transfer_to_str(transfer):
-    return " " + transfer['from'] + ' -> ' + transfer['to'] + \
+    return transfer['from'] + ' -> ' + transfer['to'] + \
             ' (' + str(transfer['amount']) + ') ' + transfer['memo']
 
 def run(args):
@@ -381,6 +387,6 @@ def run(args):
         expected_payout = get_expected_payout(transfer['amount'])
 
         if expected_payout > 0:
-            upvote_bid(post, transfer, expected_payout)
+            process_bid(post, transfer, expected_payout)
 
         start_new_thread(_locking_upvote_cycle, ())
