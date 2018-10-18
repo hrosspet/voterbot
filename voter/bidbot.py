@@ -17,6 +17,7 @@ TIME_FORMAT = CONFIG['TIME_FORMAT']
 
 db = mongo_factory(mongo_address)
 known_bidbots_col = db.get_collection('known_bidbots')
+bidbot_params_col = db.get_collection('bidbot_params')
 
 logger = logging.getLogger(__name__)
 
@@ -29,20 +30,16 @@ PAST_VOTES = CONFIG['DATABASE']['PAST_VOTES_COLLECTION_NAME']
 
 N_ACCOUNTS = 1
 
-STEEM_PRICE_USD = .793103
-SBD_PRICE_USD = .984368
-
 VOTER = 'hr1'
-MULTIPLIER = 11
 MAX_PERCENT = 100
 N_VOTES = 10
-TOTAL_PAYOUTS_SUM = 78543.460 # SBD, as of 2018/10/16
 
 BLOCK_INTERVAL = 3
 MIN_ALLOWED_PAYOUT = 1000
 
 AUCTION_TIME = 15
-VOTING_DELAY = AUCTION_TIME * 60 - 10
+
+GLOBAL = {}
 
 df_current_posts = pd.DataFrame({
                         'post': "",
@@ -52,21 +49,23 @@ df_current_posts = pd.DataFrame({
                         'bid': [],
                         })
 
-time_limits_sec = {
-    'buildawhale': 3 * 24 * 3600,
-    'emperorofnaps': 5 * 24 * 3600,
-    'minnowbooster': 2 * 24 * 3600,
-    'ocdb': 3 * 24 * 3600,
-    'smartsteem': 3.5 * 24 * 3600,
-    '': 5 * 24 * 3600, # default
-}
+global_params = ['MULTIPLIER', 'STEEM_PRICE_USD', 'SBD_PRICE_USD', 'TOTAL_PAYOUTS_SUM_SBD', 'VOTING_DELAY', 'time_limits_sec', 'amount_limits']
 
-amount_limits = {
-    'upme': [3, 100],
-    'postpromoter': [0, 49.999],
-    'minnowbooster': [0.01, 1000], # Min: 0.01, Max: 13.35, Max-Whitelist: 22.62
-    'brupvoter' : [0, 2.5],
-}
+# time_limits_sec = {
+#     'buildawhale': 3 * 24 * 3600,
+#     'emperorofnaps': 5 * 24 * 3600,
+#     'minnowbooster': 2 * 24 * 3600,
+#     'ocdb': 3 * 24 * 3600,
+#     'smartsteem': 3.5 * 24 * 3600,
+#     '': 5 * 24 * 3600, # default
+# }
+
+# amount_limits = {
+#     'upme': [3, 100],
+#     'postpromoter': [0, 49.999],
+#     'minnowbooster': [0.01, 1000], # Min: 0.01, Max: 13.35, Max-Whitelist: 22.62
+#     'brupvoter' : [0, 2.5],
+# }
 
 
 def get_id(memo):
@@ -119,8 +118,8 @@ def bidbot_not_known(transfer):
 def is_out_of_bounds(transfer):
     bidbot = transfer['to']
     amount = get_value(transfer['amount'])
-    if bidbot in amount_limits:
-        return (amount < amount_limits[bidbot][0]) or (amount > amount_limits[bidbot][1])
+    if bidbot in GLOBAL['amount_limits']:
+        return (amount < GLOBAL['amount_limits'][bidbot][0]) or (amount > GLOBAL['amount_limits'][bidbot][1])
     return False
 
 def sneaky_ninja_steem(transfer):
@@ -136,10 +135,10 @@ def post_doesnt_exist(post, transfer):
 
 def post_too_old(post, transfer):
     bidbot = transfer['to']
-    if bidbot not in time_limits_sec:
+    if bidbot not in GLOBAL['time_limits_sec']:
         bidbot = ''
     delay = (transfer['timestamp'] - post['created']).total_seconds()
-    return delay > time_limits_sec[bidbot]
+    return delay > GLOBAL['time_limits_sec'][bidbot]
 
 def voter_already_voted(post, transfer):
     votes = {x['voter'] for x in post['active_votes']}
@@ -163,6 +162,23 @@ def vote_strength_ok(percent):
     if percent > 0.01 and percent <= 100:
         return True
     return False
+
+def get_expected_payout(amount):
+    value = get_value(amount)
+    currency = get_currency(amount)
+    return value if currency == 'SBD' else value * GLOBAL['STEEM_PRICE_USD'] / GLOBAL['SBD_PRICE_USD']
+
+def get_proportional_vote_strength(expected_payout, total_payouts, votes_per_day):
+    return votes_per_day * MAX_PERCENT * expected_payout / total_payouts
+
+def round_percent(value):
+    for i in range(N_ACCOUNTS):
+        percent = round(value * 10 ** i, 2)
+
+        if percent > 10:
+            break
+
+    return percent, i
 
 
 ##########################################################################
@@ -198,28 +214,13 @@ def post_bid_invalid(post, bid):
 
     return False
 
-def get_expected_payout(amount):
-    value = get_value(amount)
-    currency = get_currency(amount)
-    return value if currency == 'SBD' else value * STEEM_PRICE_USD / SBD_PRICE_USD
-
-def get_proportional_vote_strength(expected_payout, total_payouts, votes_per_day):
-    return votes_per_day * MAX_PERCENT * expected_payout / total_payouts
-
-def round_percent(value):
-    for i in range(N_ACCOUNTS):
-        percent = round(value * 10 ** i, 2)
-
-        if percent > 10:
-            break
-
-    return percent, i
+######################################################################################################
 
 def process_bid(post, bid, expected_payout):
     global a_lock
-    percent = get_proportional_vote_strength(expected_payout, TOTAL_PAYOUTS_SUM, N_VOTES)
+    percent = get_proportional_vote_strength(expected_payout, GLOBAL['TOTAL_PAYOUTS_SUM_SBD'], N_VOTES)
 
-    percent = MULTIPLIER * percent
+    percent = GLOBAL['MULTIPLIER'] * percent
 
     percent, i = round_percent(percent)
 
@@ -231,7 +232,7 @@ def process_bid(post, bid, expected_payout):
     if vote_strength_ok(percent):
         # schedule for upvote
         with a_lock:
-            pending_time = post['created'] + timedelta(seconds=VOTING_DELAY)
+            pending_time = post['created'] + timedelta(seconds=GLOBAL['VOTING_DELAY'])
             delay = (pending_time - datetime.utcnow()).total_seconds()
 
             logger.info(' adding to upvote queue (%ds, %.2f%%, $%.2f): busy.org%s', delay, percent, expected_payout, post['url'])
@@ -244,7 +245,6 @@ def process_bid(post, bid, expected_payout):
 #         expected_reward = 0
 #         hrshares = 0
 
-######################################################################################################
 
 def _locking_upvote_cycle():
     global a_lock
@@ -304,10 +304,11 @@ def _upvote_due_posts():
                     except RPCError as e:
                         # logger.exception(e)
 
-                        for i, x in enumerate(e.args):
-                            print(i, ':', x)
+                        # for i, x in enumerate(e.args):
+                        #     print(i, ':', x)
 
-                        if 'Assert Exception:abs_rshares > STEEM_VOTE_DUST_THRESHOLD' in e.args[0]:
+                        if 'Assert Exception:abs_rshares > STEEM_VOTE_DUST_THRESHOLD' in e.args[0] or \
+                        'Assert Exception:itr->vote_percent != o.weight: Your current vote on this comment is identical to this vote.' in e.args[0]:
                             break
                         else:
                             time.sleep(BLOCK_INTERVAL)
@@ -339,19 +340,38 @@ def transfer_to_str(transfer):
     return transfer['from'] + ' -> ' + transfer['to'] + \
             ' (' + str(transfer['amount']) + ') ' + transfer['memo']
 
+def insert_param_db(name, value):
+    bidbot_params_col.insert_one({'_id': name, 'value': value})
+
+def download_param_db(name):
+    return bidbot_params_col.find_one({'_id': name})['value']
+
+def update_global_params_db():
+    global GLOBAL
+
+    for param in global_params:
+        temp = download_param_db(param)
+        if param not in GLOBAL or GLOBAL[param] != temp:
+            if param not in GLOBAL:
+                logger.info('%s initialized -> %s', param, str(temp))
+            else:
+                logger.info('%s changed %s -> %s', param, str(GLOBAL[param]), str(temp))
+
+            GLOBAL[param] = temp
+
+######################################################################################################
+
 def run(args):
     global DRY_RUN
     DRY_RUN = args.dry_run
+
     logger.info('\n\n\tDRY_RUN: %s\n', DRY_RUN)
     logger.info('KNOWN_BIDBOTS: %d', len(KNOWN_BIDBOTS))
-    logger.info('STEEM_PRICE_USD: %.2f', STEEM_PRICE_USD)
-    logger.info('SBD_PRICE_USD: %.2f', SBD_PRICE_USD)
-    logger.info('TOTAL_PAYOUTS_SUM: %.3f', TOTAL_PAYOUTS_SUM)
-    logger.info('MULTIPLIER: %d', MULTIPLIER)
     logger.info('AUCTION_TIME: %d', AUCTION_TIME)
-    logger.info('VOTING_DELAY: %d', VOTING_DELAY)
     logger.info('N_ACCOUNTS: %d', N_ACCOUNTS)
     logger.info('WIF is None: %d', WIF is None)
+
+    update_global_params_db()
 
     stream = stream_ops('transfer', wif=WIF)
 
@@ -365,10 +385,13 @@ def run(args):
             time.sleep(BLOCK_INTERVAL)
             continue
         except (StopIteration, KeyError, RPCErrorRecoverable, RPCError) as e:
-            logger.exception(e)
+            # logger.exception(e)
             time.sleep(BLOCK_INTERVAL)
+            logger.info('refreshing stream')
             stream = stream_ops('transfer', wif=WIF)
             continue
+
+        update_global_params_db()
 
         # save_data(self.db_address, RAW_POSTS_COLLECTION_NAME, post) # necessary for checking spam
 
