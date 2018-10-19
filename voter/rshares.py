@@ -8,6 +8,7 @@ MAX_PERCENT = 100
 N_ACCOUNTS = 1
 
 def approx_sqrt_v1(x):
+    x = int(x)
     if x <= 1:
         return x
     # mantissa_bits, leading_1, mantissa_mask are independent of x

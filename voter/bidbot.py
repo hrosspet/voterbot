@@ -10,6 +10,7 @@ import numpy as np
 from _thread import start_new_thread, allocate_lock
 
 from steevebase.io import mongo_factory
+from voter.rshares import get_share
 from voter.config import CONFIG
 
 mongo_address = CONFIG['DATABASE']['ADDRESS']
@@ -43,7 +44,7 @@ GLOBAL = {}
 
 df_current_posts = pd.DataFrame(columns=['bid_amount_sbd', 'voting_time', 'bots'])
 
-global_params = ['MULTIPLIER', 'MEDIAN_SBD_PRICE', 'TOTAL_PAYOUTS_SUM_SBD', 'VOTING_DELAY', 'time_limits_sec', 'amount_limits', 'BASELINE_THRESHOLD']
+global_params = ['MULTIPLIER', 'MEDIAN_SBD_PRICE', 'TOTAL_PAYOUTS_SUM_SBD', 'VOTING_DELAY', 'time_limits_sec', 'amount_limits', 'RSHARES_TO_SBD', 'BASELINE_THRESHOLD', 'rshares_hr1']
 
 # time_limits_sec = {
 #     'buildawhale': 3 * 24 * 3600,
@@ -129,10 +130,16 @@ def post_doesnt_exist(post, transfer):
 
 def post_too_old(post, transfer):
     bidbot = transfer['to']
-    if bidbot not in GLOBAL['time_limits_sec']:
-        bidbot = ''
+    if isinstance(bidbot, str):
+        bidbot = {bidbot}
+
     delay = (transfer['timestamp'] - post['created']).total_seconds()
-    return delay > GLOBAL['time_limits_sec'][bidbot]
+
+    for bot in bidbot:
+        if bot in GLOBAL['time_limits_sec'] and delay > GLOBAL['time_limits_sec'][bot]:
+            return True
+
+    return False
 
 def voter_already_voted(post, transfer):
     votes = {x['voter'] for x in post['active_votes']}
@@ -147,7 +154,7 @@ def bot_already_voted(post, transfer):
     if isinstance(transfer['to'], str):
         # if transfer['to'] is a bot name
         bots = {transfer['to']}
-    elif isinstance(transfer['to'], dict):
+    elif isinstance(transfer['to'], set):
         # if transfer['to'] is a set of bot names
         bots = transfer['to']
     else:
@@ -312,8 +319,8 @@ def upvote_post(post, voter, percent):
 def log_vote(post_id, voting_time, percent, voter, bid):
     if not DRY_RUN:
         save_post = {
-                    '_id': post['_id'],
-                    'vote_time': current_time,
+                    '_id': post_id,
+                    'vote_time': voting_time,
                     'percent': percent,
                     'voter': voter,
                     'bid': bid,
@@ -322,7 +329,7 @@ def log_vote(post_id, voting_time, percent, voter, bid):
 
 
 def vote_profitable(post, voter, percent, current_time, bid_amount_sbd):
-    hrshares_tentative = global_params['rshares_hr1'] * percent / MAX_PERCENT
+    hrshares_tentative = int(GLOBAL['rshares_hr1'] * percent / MAX_PERCENT)
     simulated_reward, _ = get_share(post, voter, hrshares_tentative, current_time, GLOBAL, simulation=True, bid_amount_sbd=bid_amount_sbd)
 
     if simulated_reward / hrshares_tentative >= GLOBAL['BASELINE_THRESHOLD'] * GLOBAL['RSHARES_TO_SBD'] * 0.25:
@@ -345,12 +352,15 @@ def _upvote_due_posts():
             percent = get_percent(bid_amount_sbd)
 
             # fake bid to look like a bid, but contain the set of all bots which should be upvoting the post
-            bid = {'to': pending_upvote['bots']}
+            bid = {
+                    'to': pending_upvote['bots'],
+                    'timestamp': current_time
+                    }
             if vote_strength_ok(percent) and not post_bid_invalid(post, bid) and vote_profitable(post, VOTER, percent, current_time, bid_amount_sbd):
                 # additional checks here
                 success = upvote_post(post, VOTER, percent)
                 if success:
-                    log_vote(post_id, current_time, percent, VOTER, bid)
+                    log_vote(identifier, current_time, percent, VOTER, bid)
 
 
     df_current_posts = df_current_posts.drop(clean_current_posts)
