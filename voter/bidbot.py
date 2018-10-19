@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timedelta
 from steem.post import Post
 from steembase.exceptions import PostDoesNotExist, RPCErrorRecoverable, RPCError
-from steevebase.io import stream_ops, save_data
+from steevebase.io import stream_ops, save_data, load_data
 import time
 import pandas as pd
 import numpy as np
@@ -43,7 +43,7 @@ GLOBAL = {}
 
 df_current_posts = pd.DataFrame(columns=['bid_amount_sbd', 'voting_time', 'bots'])
 
-global_params = ['MULTIPLIER', 'STEEM_PRICE_USD', 'SBD_PRICE_USD', 'TOTAL_PAYOUTS_SUM_SBD', 'VOTING_DELAY', 'time_limits_sec', 'amount_limits', 'BASELINE_THRESHOLD']
+global_params = ['MULTIPLIER', 'MEDIAN_SBD_PRICE', 'TOTAL_PAYOUTS_SUM_SBD', 'VOTING_DELAY', 'time_limits_sec', 'amount_limits', 'BASELINE_THRESHOLD']
 
 # time_limits_sec = {
 #     'buildawhale': 3 * 24 * 3600,
@@ -175,7 +175,7 @@ def vote_strength_ok(percent):
 def get_expected_payout(amount):
     value = get_value(amount)
     currency = get_currency(amount)
-    return value if currency == 'SBD' else value * GLOBAL['STEEM_PRICE_USD'] / GLOBAL['SBD_PRICE_USD']
+    return value if currency == 'SBD' else value * GLOBAL['MEDIAN_SBD_PRICE']
 
 def get_proportional_vote_strength(expected_payout, total_payouts, votes_per_day):
     return votes_per_day * MAX_PERCENT * expected_payout / total_payouts
@@ -257,7 +257,7 @@ def _add_to_upvote_queue(bid):
             post_id = post['identifier']
             bots = {bid['to']}
             voting_time = post['created'] + timedelta(seconds=GLOBAL['VOTING_DELAY'])
-            delay = (pending_time - datetime.utcnow()).total_seconds()
+            delay = (voting_time - datetime.utcnow()).total_seconds()
 
             if post_id in df_current_posts.index:
                 previous_bid_amount_sbd = df_current_posts.loc[post_id, 'bid_amount_sbd']
