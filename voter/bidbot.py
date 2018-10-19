@@ -220,7 +220,7 @@ def process_bid(post, bid, expected_payout):
     global a_lock
     percent = get_proportional_vote_strength(expected_payout, GLOBAL['TOTAL_PAYOUTS_SUM_SBD'], N_VOTES)
 
-    percent = GLOBAL['MULTIPLIER'] * percent
+    percent *= GLOBAL['MULTIPLIER']
 
     percent, i = round_percent(percent)
 
@@ -275,8 +275,10 @@ def _add_to_upvote_queue(post, percent, pending_time, voter, bid):
 def _upvote_due_posts():
     global df_current_posts
     clean_current_posts = []
+
     for i, one_post_info in df_current_posts.iterrows():
         current_time = datetime.utcnow()
+
         if one_post_info['pending_times'] <= current_time:
             identifier = one_post_info['post']
             post = get_post(identifier)
@@ -407,9 +409,9 @@ def run(args):
 
         logger.info(transfer_to_str(transfer))
 
-        expected_payout = get_expected_payout(transfer['amount'])
+        bid_amount_sbd = get_expected_payout(transfer['amount'])
 
-        if expected_payout > 0:
-            process_bid(post, transfer, expected_payout)
+        if bid_amount_sbd > 0:
+            process_bid(post, transfer, bid_amount_sbd)
 
         start_new_thread(_locking_upvote_cycle, ())
