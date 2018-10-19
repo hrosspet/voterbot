@@ -41,15 +41,9 @@ AUCTION_TIME = 15
 
 GLOBAL = {}
 
-df_current_posts = pd.DataFrame({
-                        'post': "",
-                        'pending_times': [],
-                        'percent': [],
-                        'voter': [],
-                        'bid': [],
-                        })
+df_current_posts = pd.DataFrame(columns=['bid_amount_sbd', 'voting_time', 'bots'])
 
-global_params = ['MULTIPLIER', 'STEEM_PRICE_USD', 'SBD_PRICE_USD', 'TOTAL_PAYOUTS_SUM_SBD', 'VOTING_DELAY', 'time_limits_sec', 'amount_limits']
+global_params = ['MULTIPLIER', 'STEEM_PRICE_USD', 'SBD_PRICE_USD', 'TOTAL_PAYOUTS_SUM_SBD', 'VOTING_DELAY', 'time_limits_sec', 'amount_limits', 'BASELINE_THRESHOLD']
 
 # time_limits_sec = {
 #     'buildawhale': 3 * 24 * 3600,
@@ -142,12 +136,27 @@ def post_too_old(post, transfer):
 
 def voter_already_voted(post, transfer):
     votes = {x['voter'] for x in post['active_votes']}
-    return VOTER in votes
+    if VOTER in votes:
+        return True
+
+    _, count = load_data(mongo_address, PAST_VOTES, {'_id': post['identifier']})
+
+    return count > 0
 
 def bot_already_voted(post, transfer):
-    bidbot = transfer['to']
-    votes = {x['voter'] for x in post['active_votes']}
-    return bidbot in votes
+    if isinstance(transfer['to'], str):
+        # if transfer['to'] is a bot name
+        bots = {transfer['to']}
+    elif isinstance(transfer['to'], dict):
+        # if transfer['to'] is a set of bot names
+        bots = transfer['to']
+    else:
+        raise RuntimeError('unexpected parameter: ' + str(transfer))
+
+    voters = {x['voter'] for x in post['active_votes']}
+    common_voters = voters.intersection(bots)
+
+    return len(common_voters) > 0
 
 def curation_not_allowed(post, transfer):
     return not post['allow_curation_rewards']
@@ -193,10 +202,10 @@ CHECKS_BID = [
 CHECKS_POST_BID = [
     post_doesnt_exist,
     post_too_old,
+    curation_not_allowed,
+    max_payout_too_low,
     voter_already_voted,
     bot_already_voted,
-    curation_not_allowed,
-    max_payout_too_low
 ]
 
 def bid_invalid(bid):
@@ -216,8 +225,7 @@ def post_bid_invalid(post, bid):
 
 ######################################################################################################
 
-def process_bid(post, bid, expected_payout):
-    global a_lock
+def get_percent(expected_payout):
     percent = get_proportional_vote_strength(expected_payout, GLOBAL['TOTAL_PAYOUTS_SUM_SBD'], N_VOTES)
 
     percent *= GLOBAL['MULTIPLIER']
@@ -228,52 +236,47 @@ def process_bid(post, bid, expected_payout):
         logger.info('\n\n\t!!!additional accounts not set!!!\n')
 
     percent = min(percent, 100)
-
-    if vote_strength_ok(percent):
-        # schedule for upvote
-        with a_lock:
-            pending_time = post['created'] + timedelta(seconds=GLOBAL['VOTING_DELAY'])
-            delay = (pending_time - datetime.utcnow()).total_seconds()
-
-            logger.info(' adding to upvote queue (%ds, %.2f%%, $%.2f): busy.org%s', delay, percent, expected_payout, post['url'])
-
-            _add_to_upvote_queue(post, percent, pending_time, VOTER, bid)
-
-        # how much will we get from the vote?
-#         expected_reward = get_share(post, 'hr1', hrshares)[0]
-#     else:
-#         expected_reward = 0
-#         hrshares = 0
+    return percent
 
 
-def _locking_upvote_cycle():
+def _locking_upvote_cycle(bid):
     global a_lock
     with a_lock:
+        _add_to_upvote_queue(bid)
         _upvote_due_posts()
 
 
-def _add_to_upvote_queue(post, percent, pending_time, voter, bid):
+def _add_to_upvote_queue(bid):
     global df_current_posts
-    pending_upvotes = df_current_posts[df_current_posts.post == post['identifier']]
 
-    if pending_upvotes.empty:
-        # add new upvote to queue
-        df_current_posts = df_current_posts.append(
-            {'pending_times': pending_time,
-             'post': post['identifier'],
-             'percent': percent,
-             'voter': voter,
-             'bid': bid
-             },
-            ignore_index=True)
-    else:
-        # update existing upvote
-        df_current_posts.loc[pending_upvotes.index[0], 'percent'] += percent
+    bid_amount_sbd = get_expected_payout(bid['amount'])
+    if bid_amount_sbd > 0:
+        post = get_post_from_transfer(bid)
+
+        if not post_bid_invalid(post, bid):
+            post_id = post['identifier']
+            bots = {bid['to']}
+            voting_time = post['created'] + timedelta(seconds=GLOBAL['VOTING_DELAY'])
+            delay = (pending_time - datetime.utcnow()).total_seconds()
+
+            if post_id in df_current_posts.index:
+                previous_bid_amount_sbd = df_current_posts.loc[post_id, 'bid_amount_sbd']
+                previous_bots = df_current_posts.loc[post_id, 'bots']
+
+                bots.update(previous_bots)
+                bid_amount_sbd += previous_bid_amount_sbd
+
+                logger.info(' increasing bid ($%.2f -> $%.2f): busy.org%s', previous_bid_amount_sbd, bid_amount_sbd, post['url'])
+                # increase also delay? - such that more bids can come..
+
+            df_current_posts.loc[post_id] = [bid_amount_sbd, voting_time, bots]
+            logger.info(' adding to upvote queue (%ds, $%.2f): busy.org%s', delay, bid_amount_sbd, post['url'])
+
+            df_current_posts = df_current_posts.sort_values(by='voting_time')
 
 
 def upvote_post(post, voter, percent):
     created = datetime.strptime(str(post['created']), TIME_FORMAT)
-    # age = (datetime.utcnow() - created).total_seconds()
     age = datetime.utcnow() - created
 
     logger.info("  Upvoting (%s / %.2f%%): %s votes after [%s]: busy.org%s",
@@ -284,11 +287,10 @@ def upvote_post(post, voter, percent):
         try:
             if not DRY_RUN:
                 post.upvote(percent, voter)
-            # time.sleep(BLOCK_INTERVAL)
+                # time.sleep(BLOCK_INTERVAL)
             retry_upvote = False
         except RPCError as e:
             # logger.exception(e)
-
             # for i, x in enumerate(e.args):
             #     print(i, ':', x)
 
@@ -319,25 +321,36 @@ def log_vote(post_id, voting_time, percent, voter, bid):
         save_data(mongo_address, PAST_VOTES, save_post)
 
 
+def vote_profitable(post, voter, percent, current_time, bid_amount_sbd):
+    hrshares_tentative = global_params['rshares_hr1'] * percent / MAX_PERCENT
+    simulated_reward, _ = get_share(post, voter, hrshares_tentative, current_time, GLOBAL, simulation=True, bid_amount_sbd=bid_amount_sbd)
+
+    if simulated_reward / hrshares_tentative >= GLOBAL['BASELINE_THRESHOLD'] * GLOBAL['RSHARES_TO_SBD'] * 0.25:
+        return True
+
+    return False
+
 def _upvote_due_posts():
     global df_current_posts
     clean_current_posts = []
 
-    for i, pending_upvote in df_current_posts.iterrows():
+    for identifier, pending_upvote in df_current_posts.iterrows():
         current_time = datetime.utcnow()
 
-        if pending_upvote['pending_times'] <= current_time:
-            post = get_post(pending_upvote['post'])
-            bid = pending_upvote['bid']
-            percent = pending_upvote['percent']
-            voter = pending_upvote['voter']
+        if pending_upvote['voting_time'] <= current_time:
+            post = get_post(identifier)
+            clean_current_posts.append(identifier)
 
-            clean_current_posts.append(i)
+            bid_amount_sbd = pending_upvote['bid_amount_sbd']
+            percent = get_percent(bid_amount_sbd)
 
-            if not post_bid_invalid(post, bid):
-                success = upvote_post(post, voter, percent)
+            # fake bid to look like a bid, but contain the set of all bots which should be upvoting the post
+            bid = {'to': pending_upvote['bots']}
+            if vote_strength_ok(percent) and not post_bid_invalid(post, bid) and vote_profitable(post, VOTER, percent, current_time, bid_amount_sbd):
+                # additional checks here
+                success = upvote_post(post, VOTER, percent)
                 if success:
-                    log_vote(post_id, current_time, percent, voter, bid)
+                    log_vote(post_id, current_time, percent, VOTER, bid)
 
 
     df_current_posts = df_current_posts.drop(clean_current_posts)
@@ -401,23 +414,9 @@ def run(args):
 
         update_global_params_db()
 
-        # save_data(self.db_address, RAW_POSTS_COLLECTION_NAME, post) # necessary for checking spam
-
-        # print('\ntransfer', transfer)
-
         if bid_invalid(transfer):
-            continue
-
-        post = get_post_from_transfer(transfer)
-
-        if post_bid_invalid(post, transfer):
             continue
 
         logger.info(transfer_to_str(transfer))
 
-        bid_amount_sbd = get_expected_payout(transfer['amount'])
-
-        if bid_amount_sbd > 0:
-            process_bid(post, transfer, bid_amount_sbd)
-
-        start_new_thread(_locking_upvote_cycle, ())
+        start_new_thread(_locking_upvote_cycle, (transfer,))
