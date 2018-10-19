@@ -109,6 +109,9 @@ def amount_to_rshares(amount, steem_price_usd, sbd_price_usd, rshares_to_sbd):
 
     return int(amount / rshares_to_sbd)
 
+def sbd_to_rshares(sbd, global_params):
+    return sbd / global_params['RSHARES_TO_SBD']
+
 def inject_hr1_bidbot(post, rshares_hr1, rshares_bidbot, voting_time):
     hr_vote = {
         'voter': 'hr1',
@@ -158,7 +161,7 @@ def get_post_curator_payout(post):
 
     return payout, pending
 
-def get_share(post, voter='hr1', rshares_hr1=0, voting_time=None, global_params=None, simulation=False, bid=None):
+def get_share(post, voter='hr1', rshares_hr1=0, voting_time=None, global_params=None, simulation=False, bid_amount_sbd=None):
 
     rshares_hr1 = int(rshares_hr1)
 
@@ -180,7 +183,7 @@ def get_share(post, voter='hr1', rshares_hr1=0, voting_time=None, global_params=
         voting_time = max(created + timedelta(seconds=VOTING_DELAY), voting_time)
 
     if simulation:
-        bid_rshares = amount_to_rshares(bid['amount'], global_params['STEEM_PRICE_USD'], global_params['SBD_PRICE_USD'], global_params['RSHARES_TO_SBD'])
+        bid_rshares = sbd_to_rshares(bid_amount_sbd, global_params)
         inject_hr1_bidbot(changed_post, rshares_hr1, bid_rshares, voting_time)
         injected_rshares = rshares_hr1 + bid_rshares
     else:
@@ -281,9 +284,9 @@ def simulate_vote(bid_amount_sbd, total_payouts_sum, post, bid, global_params, s
 
             if vote_strength_ok(hrshares_tentative, rshares_hr1):
                 # first simulate only with information available at the time of the bid
-                simulated_reward, _ = get_share(post, 'hr1', hrshares_tentative, bid['timestamp'], global_params, simulation=True, bid=bid)
+                simulated_reward, _ = get_share(post, 'hr1', hrshares_tentative, bid['timestamp'], global_params, simulation=True, bid_amount_sbd=bid_amount_sbd)
 
-                if simulated_reward / hrshares_tentative >= global_params['BASELINE_THRESHOLD']:
+                if simulated_reward / hrshares_tentative >= global_params['BASELINE_THRESHOLD'] * global_params['RSHARES_TO_SBD'] * 0.25:
                     # how much will we get from the vote?
                     expected_reward, _ = get_share(post, 'hr1', hrshares_tentative, voting_time=bid['timestamp'], global_params=global_params)
                     hrshares = hrshares_tentative
