@@ -123,6 +123,9 @@ def sneaky_ninja_steem(transfer):
 def target_is_bidbot(transfer):
     return get_author(transfer['memo']) in KNOWN_BIDBOTS
 
+def is_bot_2_bot(transfer):
+    return transfer['from'] in KNOWN_BIDBOTS and transfer['to'] in KNOWN_BIDBOTS
+
 ############ CHECKS_POST_BID ###########################################
 
 def post_doesnt_exist(post, transfer):
@@ -203,6 +206,7 @@ CHECKS_BID = [
     not_a_bid,
     bidbot_not_known,
     target_is_bidbot,
+    is_bot_2_bot,
     is_out_of_bounds,
     sneaky_ninja_steem,
 ]
@@ -224,8 +228,8 @@ def bid_invalid(bid):
 
 def post_bid_invalid(post, bid):
     for check in CHECKS_POST_BID:
-        # print('check:', check.__name__, check(post, bid))
         if check(post, bid):
+            logger.info(' e-e: %s', check.__name__)
             return True
 
     return False
@@ -318,6 +322,9 @@ def upvote_post(post, voter, percent):
 
 def log_vote(post_id, voting_time, percent, voter, bid):
     if not DRY_RUN:
+        if isinstance(bid['to'], set):
+            bid['to'] = list(bid['to'])
+
         save_post = {
                     '_id': post_id,
                     'vote_time': voting_time,
@@ -328,14 +335,15 @@ def log_vote(post_id, voting_time, percent, voter, bid):
         save_data(mongo_address, PAST_VOTES, save_post)
 
 
-def vote_profitable(post, voter, percent, current_time, bid_amount_sbd):
+def is_vote_profitable(post, voter, percent, current_time, bid_amount_sbd):
     hrshares_tentative = int(GLOBAL['rshares_hr1'] * percent / MAX_PERCENT)
     simulated_reward, _ = get_share(post, voter, hrshares_tentative, current_time, GLOBAL, simulation=True, bid_amount_sbd=bid_amount_sbd)
+    ratio = simulated_reward / (percent / MAX_PERCENT)
 
     if simulated_reward / hrshares_tentative >= GLOBAL['BASELINE_THRESHOLD'] * GLOBAL['RSHARES_TO_SBD'] * 0.25:
-        return True
+        return True, ratio
 
-    return False
+    return False, ratio
 
 def _upvote_due_posts():
     global df_current_posts
@@ -356,12 +364,16 @@ def _upvote_due_posts():
                     'to': pending_upvote['bots'],
                     'timestamp': current_time
                     }
-            if vote_strength_ok(percent) and not post_bid_invalid(post, bid) and vote_profitable(post, VOTER, percent, current_time, bid_amount_sbd):
-                # additional checks here
-                success = upvote_post(post, VOTER, percent)
-                if success:
-                    log_vote(identifier, current_time, percent, VOTER, bid)
 
+            if vote_strength_ok(percent) and not post_bid_invalid(post, bid):
+                vote_profitable, ratio = is_vote_profitable(post, VOTER, percent, current_time, bid_amount_sbd)
+                if vote_profitable:
+                    # additional checks here
+                    success = upvote_post(post, VOTER, percent)
+                    if success:
+                        log_vote(identifier, current_time, percent, VOTER, bid)
+                else:
+                    logger.info('  vote not profitable ($%.3f): busy.org%s', ratio, post['url'])
 
     df_current_posts = df_current_posts.drop(clean_current_posts)
 
