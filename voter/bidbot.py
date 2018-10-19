@@ -271,67 +271,73 @@ def _add_to_upvote_queue(post, percent, pending_time, voter, bid):
         df_current_posts.loc[pending_upvotes.index[0], 'percent'] += percent
 
 
+def upvote_post(post, voter, percent):
+    created = datetime.strptime(str(post['created']), TIME_FORMAT)
+    # age = (datetime.utcnow() - created).total_seconds()
+    age = datetime.utcnow() - created
+
+    logger.info("  Upvoting (%s / %.2f%%): %s votes after [%s]: busy.org%s",
+        voter, percent, post["net_votes"], age, post['url'])
+
+    retry_upvote = True
+    while retry_upvote:
+        try:
+            if not DRY_RUN:
+                post.upvote(percent, voter)
+            # time.sleep(BLOCK_INTERVAL)
+            retry_upvote = False
+        except RPCError as e:
+            # logger.exception(e)
+
+            # for i, x in enumerate(e.args):
+            #     print(i, ':', x)
+
+            if 'Assert Exception:abs_rshares > STEEM_VOTE_DUST_THRESHOLD' in e.args[0] or \
+            'Assert Exception:itr->vote_percent != o.weight: Your current vote on this comment is identical to this vote.' in e.args[0]:
+                break
+            else:
+                time.sleep(BLOCK_INTERVAL)
+
+        except Exception as e:
+            logger.exception("Error when voting.")
+            break
+
+    # if upvote cycle not finished with an upvote (in which case retry_upvote == True), skip saving this vote
+    success = not retry_upvote
+    return success
+
+
+def log_vote(post_id, voting_time, percent, voter, bid):
+    if not DRY_RUN:
+        save_post = {
+                    '_id': post['_id'],
+                    'vote_time': current_time,
+                    'percent': percent,
+                    'voter': voter,
+                    'bid': bid,
+                    }
+        save_data(mongo_address, PAST_VOTES, save_post)
+
 
 def _upvote_due_posts():
     global df_current_posts
     clean_current_posts = []
 
-    for i, one_post_info in df_current_posts.iterrows():
+    for i, pending_upvote in df_current_posts.iterrows():
         current_time = datetime.utcnow()
 
-        if one_post_info['pending_times'] <= current_time:
-            identifier = one_post_info['post']
-            post = get_post(identifier)
-            bid = one_post_info['bid']
-            percent = one_post_info['percent']
-            voter = one_post_info['voter']
+        if pending_upvote['pending_times'] <= current_time:
+            post = get_post(pending_upvote['post'])
+            bid = pending_upvote['bid']
+            percent = pending_upvote['percent']
+            voter = pending_upvote['voter']
 
             clean_current_posts.append(i)
 
             if not post_bid_invalid(post, bid):
-                created = datetime.strptime(str(post['created']), TIME_FORMAT)
-                # age = (datetime.utcnow() - created).total_seconds()
-                age = datetime.utcnow() - created
-
-                logger.info("  Upvoting (%s / %.2f%%): %s votes after [%s]: busy.org%s",
-                    voter, percent, post["net_votes"], age, post['url'])
-
-                retry_upvote = True
-                while retry_upvote:
-                    try:
-                        if not DRY_RUN:
-                            post.upvote(percent, voter)
-                        # time.sleep(BLOCK_INTERVAL)
-                        retry_upvote = False
-                    except RPCError as e:
-                        # logger.exception(e)
-
-                        # for i, x in enumerate(e.args):
-                        #     print(i, ':', x)
-
-                        if 'Assert Exception:abs_rshares > STEEM_VOTE_DUST_THRESHOLD' in e.args[0] or \
-                        'Assert Exception:itr->vote_percent != o.weight: Your current vote on this comment is identical to this vote.' in e.args[0]:
-                            break
-                        else:
-                            time.sleep(BLOCK_INTERVAL)
-
-                    except Exception as e:
-                        logger.exception("Error when voting.")
-                        break
-
-                if retry_upvote:
-                    # if upvote cycle not finished with an upvote (in which case retry_upvote == True), skip saving this vote
-                    continue
-
-                if not DRY_RUN:
-                    save_post = {
-                                '_id': post['_id'],
-                                'vote_time': current_time,
-                                'percent': percent,
-                                'voter': voter,
-                                'bid': bid,
-                                }
-                    save_data(mongo_address, PAST_VOTES, save_post)
+                success = upvote_post(post, voter, percent)
+                if success:
+                    log_vote(post_id, current_time, percent, voter, bid)
 
 
     df_current_posts = df_current_posts.drop(clean_current_posts)
