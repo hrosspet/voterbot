@@ -3,6 +3,10 @@ from datetime import datetime, timedelta
 from steem.post import Post
 from steembase.exceptions import PostDoesNotExist, RPCErrorRecoverable, RPCError
 from steevebase.io import stream_ops, save_data, load_data
+from voter.rshares import get_proportional_vote_strength, round_percent, get_currency, get_id
+from voter.rshares import get_currency, get_value, get_id, get_author
+from voter.rshares import not_a_bid, sneaky_ninja_steem
+from voter.rshares import post_doesnt_exist, curation_not_allowed, max_payout_too_low
 import time
 import pandas as pd
 import numpy as np
@@ -36,7 +40,6 @@ MAX_PERCENT = 100
 N_VOTES = 10
 
 BLOCK_INTERVAL = 3
-MIN_ALLOWED_PAYOUT = 1000
 
 AUCTION_TIME = 15
 
@@ -63,9 +66,6 @@ global_params = ['MULTIPLIER', 'MEDIAN_SBD_PRICE', 'TOTAL_PAYOUTS_SUM_SBD', 'VOT
 # }
 
 
-def get_id(memo):
-    return memo.split('@')[-1]
-
 def get_post(identifier, post_cache={}):
     try:
         post = Post(identifier)
@@ -87,28 +87,17 @@ def get_post_from_transfer(transfer):
 def _parse_vote_time(vote_time):
     return datetime.strptime(vote_time, '%Y-%m-%dT%H:%M:%S')
 
-def get_currency(amount):
-    return amount.split(' ')[1]
-
-def get_value(amount):
-    return float(amount.split(' ')[0])
-
-def is_bid(memo):
-    if isinstance(memo, str):
-        return memo.startswith('https://steemit.com')
-    return False
-
-def get_author(url):
-    return url.split('/')[-2][1:]
-
 ############ CHECKS_BID ################################################
-
-def not_a_bid(transfer):
-    return not is_bid(transfer['memo'])
 
 def bidbot_not_known(transfer):
     bidbot = transfer['to']
-    return not bidbot in KNOWN_BIDBOTS
+    return bidbot not in KNOWN_BIDBOTS
+
+def target_is_bidbot(transfer):
+    return get_author(transfer['memo']) in KNOWN_BIDBOTS
+
+def is_bot_2_bot(transfer):
+    return transfer['from'] in KNOWN_BIDBOTS and transfer['to'] in KNOWN_BIDBOTS
 
 def is_out_of_bounds(transfer):
     bidbot = transfer['to']
@@ -117,19 +106,7 @@ def is_out_of_bounds(transfer):
         return (amount < GLOBAL['amount_limits'][bidbot][0]) or (amount > GLOBAL['amount_limits'][bidbot][1])
     return False
 
-def sneaky_ninja_steem(transfer):
-    return transfer['to'] == 'sneaky-ninja' and get_currency(transfer['amount']) == 'STEEM'
-
-def target_is_bidbot(transfer):
-    return get_author(transfer['memo']) in KNOWN_BIDBOTS
-
-def is_bot_2_bot(transfer):
-    return transfer['from'] in KNOWN_BIDBOTS and transfer['to'] in KNOWN_BIDBOTS
-
 ############ CHECKS_POST_BID ###########################################
-
-def post_doesnt_exist(post, transfer):
-    return post is None
 
 def post_too_old(post, transfer):
     bidbot = transfer['to']
@@ -137,6 +114,10 @@ def post_too_old(post, transfer):
         bidbot = {bidbot}
 
     delay = (transfer['timestamp'] - post['created']).total_seconds()
+
+    # check default
+    if delay > GLOBAL['time_limits_sec']['']:
+        return True
 
     for bot in bidbot:
         if bot in GLOBAL['time_limits_sec'] and delay > GLOBAL['time_limits_sec'][bot]:
@@ -168,12 +149,6 @@ def bot_already_voted(post, transfer):
 
     return len(common_voters) > 0
 
-def curation_not_allowed(post, transfer):
-    return not post['allow_curation_rewards']
-
-def max_payout_too_low(post, transfer):
-    return post['max_accepted_payout']['amount'] < MIN_ALLOWED_PAYOUT
-
 ##########################################################################
 
 def vote_strength_ok(percent):
@@ -185,20 +160,12 @@ def vote_strength_ok(percent):
 def get_expected_payout(amount):
     value = get_value(amount)
     currency = get_currency(amount)
-    return value if currency == 'SBD' else value * GLOBAL['MEDIAN_SBD_PRICE']
+    if currency != 'SBD':
+        value *= GLOBAL['MEDIAN_SBD_PRICE']
 
-def get_proportional_vote_strength(expected_payout, total_payouts, votes_per_day):
-    return votes_per_day * MAX_PERCENT * expected_payout / total_payouts
-
-def round_percent(value):
-    for i in range(N_ACCOUNTS):
-        percent = round(value * 10 ** i, 2)
-
-        if percent > 10:
-            break
-
-    return percent, i
-
+    # increase by curation reward
+    value /= 0.75
+    return value
 
 ##########################################################################
 
@@ -277,21 +244,21 @@ def _add_to_upvote_queue(bid):
                 bots.update(previous_bots)
                 bid_amount_sbd += previous_bid_amount_sbd
 
-                logger.info(' increasing bid ($%.2f -> $%.2f): busy.org%s', previous_bid_amount_sbd, bid_amount_sbd, post['url'])
+                logger.info(' increasing bid ($%.3f -> $%.3f): busy.org%s', previous_bid_amount_sbd, bid_amount_sbd, post['url'])
                 # increase also delay? - such that more bids can come..
 
             df_current_posts.loc[post_id] = [bid_amount_sbd, voting_time, bots]
-            logger.info(' adding to upvote queue (%ds, $%.2f): busy.org%s', delay, bid_amount_sbd, post['url'])
+            logger.info(' adding to upvote queue (%ds, $%.3f): busy.org%s', delay, bid_amount_sbd, post['url'])
 
             df_current_posts = df_current_posts.sort_values(by='voting_time')
 
 
-def upvote_post(post, voter, percent):
+def upvote_post(post, voter, percent, ratio):
     created = datetime.strptime(str(post['created']), TIME_FORMAT)
     age = datetime.utcnow() - created
 
-    logger.info("  Upvoting (%s / %.2f%%): %s votes after [%s]: busy.org%s",
-        voter, percent, post["net_votes"], age, post['url'])
+    logger.info("  Upvoting (%.2f%% / $%.3f): %s votes after [%s]: busy.org%s",
+        percent, ratio, post["net_votes"], age, post['url'])
 
     retry_upvote = True
     while retry_upvote:
@@ -369,11 +336,11 @@ def _upvote_due_posts():
                 vote_profitable, ratio = is_vote_profitable(post, VOTER, percent, current_time, bid_amount_sbd)
                 if vote_profitable:
                     # additional checks here
-                    success = upvote_post(post, VOTER, percent)
+                    success = upvote_post(post, VOTER, percent, ratio)
                     if success:
                         log_vote(identifier, current_time, percent, VOTER, bid)
                 else:
-                    logger.info('  vote not profitable ($%.3f): busy.org%s', ratio, post['url'])
+                    logger.info('  e-e: vote not profitable ($%.3f): busy.org%s', ratio, post['url'])
 
     df_current_posts = df_current_posts.drop(clean_current_posts)
 

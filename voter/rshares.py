@@ -1,4 +1,5 @@
 import copy
+import numpy as np
 from datetime import datetime, timedelta
 from steem.post import Post
 
@@ -6,6 +7,8 @@ AUCTION_TIME = 15
 VOTING_DELAY = AUCTION_TIME * 60 - 10
 MAX_PERCENT = 100
 N_ACCOUNTS = 1
+
+MIN_ALLOWED_PAYOUT = 1000
 
 def approx_sqrt_v1(x):
     x = int(x)
@@ -254,12 +257,34 @@ def get_permlink(url):
 def get_author(url):
     return url.split('/')[-2][1:]
 
+def get_id(memo):
+    return memo.split('@')[-1]
+
 def get_ap(url):
     url = url.split('/')
     return url[-2][1:], url[-1]
 
 def parse_timestamp(timestamp):
     return datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+
+############ CHECKS_BID ################################################
+
+def not_a_bid(transfer):
+    return not is_bid(transfer['memo'])
+
+def sneaky_ninja_steem(transfer):
+    return transfer['to'] == 'sneaky-ninja' and get_currency(transfer['amount']) == 'STEEM'
+
+############ CHECKS_POST_BID ###########################################
+
+def post_doesnt_exist(post, transfer):
+    return post is None
+
+def curation_not_allowed(post, transfer):
+    return not post['allow_curation_rewards']
+
+def max_payout_too_low(post, transfer):
+    return post['max_accepted_payout']['amount'] < MIN_ALLOWED_PAYOUT
 
 ###################################################################################################################
 
@@ -270,6 +295,11 @@ def simulate_vote(bid_amount_sbd, total_payouts_sum, post, bid, global_params, s
     if bid_amount_sbd > 0:
         # how strong should the vote be?
         is_on_time = bid['timestamp'] < post['created'] + timedelta(seconds=VOTING_DELAY)
+
+        # if bid not cached, add with default values
+        if not post['identifier'] in simulation_df.index:
+            simulation_df.loc[post['identifier']] = [np.nan, np.nan, bid_amount_sbd, False]
+
         # post not upvoted or is in the queue, but still not upvoted
         if not simulation_df.loc[post['identifier'], 'updated'] or is_on_time:
             if simulation_df.loc[post['identifier'], 'updated'] and is_on_time:
