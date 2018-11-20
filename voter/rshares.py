@@ -3,6 +3,8 @@ import numpy as np
 from datetime import datetime, timedelta
 from steem.post import Post
 
+from steevebase.io import steem_factory
+
 AUCTION_TIME = 15
 VOTING_DELAY = AUCTION_TIME * 60 - 10
 MAX_PERCENT = 100
@@ -33,12 +35,13 @@ def approx_sqrt_v1(x):
 
 weight_fct = approx_sqrt_v1
 
-def recalculate_weights(active_votes, created, voter='hr1'):
+def recalculate_weights(sorted_active_votes, created, voter='hr1'):
     rshares_total = 0
     weight_total = 0
+    weight_total_diminished = 0 # we also need to know the weight which doesn't go back to reward pool
     weight_hr1 = 0
 
-    for i, vote in enumerate(active_votes):
+    for vote in sorted_active_votes:
         w_before = weight_fct(rshares_total)
 
         rshares_total += vote['rshares']
@@ -58,6 +61,7 @@ def recalculate_weights(active_votes, created, voter='hr1'):
 
         # here apply the coeff to get correct weight for the curator
         w *= delay_coeff
+        weight_total_diminished += w
 
         if vote['voter'] == voter:
             weight_hr1 = w
@@ -69,9 +73,13 @@ def recalculate_weights(active_votes, created, voter='hr1'):
 
     if weight_total > 0:
         percent = weight_hr1 / weight_total
+
+        # account for weight lost due to reverse auction
+        # rshares_total *= weight_total_diminished / weight_total
 #         weighted_rshares = percent * rshares_total
 
 #     return weighted_rshares, percent
+
     return percent, rshares_total
 
 
@@ -106,15 +114,10 @@ def inject_hr1(post, rshares_hr1, voting_time):
     elif not injected:
         post['active_votes'] += [hr_vote]
 
-def amount_to_rshares(amount, steem_price_usd, sbd_price_usd, rshares_to_sbd):
-    amount, currency = parse_amount(amount)
-    if currency == 'STEEM':
-        amount = amount * steem_price_usd / sbd_price_usd
-
-    return int(amount / rshares_to_sbd)
 
 def sbd_to_rshares(sbd, global_params):
     return sbd / global_params['RSHARES_TO_SBD']
+
 
 def inject_hr1_bidbot(post, rshares_hr1, rshares_bidbot, voting_time):
     hr_vote = {
@@ -143,11 +146,19 @@ def inject_hr1_bidbot(post, rshares_hr1, rshares_bidbot, voting_time):
     elif not injected:
         post['active_votes'] += injected_votes
 
-def parse_voting(active_votes):
-    for vote in active_votes:
+
+def parse_voting(active_votes, skip=set()):
+    skip_index = None
+    for i, vote in enumerate(active_votes):
+        if vote['voter'] in skip:
+            skip_index = i
+
         vote['rshares'] = int(vote['rshares'])
         if isinstance(vote['time'], str):
             vote['time'] = datetime.strptime(vote['time'], '%Y-%m-%dT%H:%M:%S')
+
+    if skip_index:
+        active_votes = active_votes[:skip_index] + active_votes[skip_index+1:]
 
     return active_votes
 
@@ -165,7 +176,8 @@ def get_post_curator_payout(post):
 
     return payout, pending
 
-def get_share(post, voter='hr1', rshares_hr1=0, voting_time=None, global_params=None, simulation=False, bid_amount_sbd=None):
+
+def get_share(post, voter='hr1', rshares_hr1=0, voting_time=None, global_params=None, simulation=False, bid_amount_sbd=None, skip=set()):
 
     rshares_hr1 = int(rshares_hr1)
 
@@ -176,8 +188,10 @@ def get_share(post, voter='hr1', rshares_hr1=0, voting_time=None, global_params=
 #     changed_post = post.export()
 
     created = changed_post['created']
+
     # parse times
-    changed_post['active_votes'] = parse_voting(changed_post['active_votes'])
+    # skip voters in skip set
+    changed_post['active_votes'] = parse_voting(changed_post['active_votes'], skip)
     # sort wrt times
     changed_post['active_votes'] = sorted(changed_post['active_votes'], key=lambda x: x['time'])
 
@@ -199,7 +213,7 @@ def get_share(post, voter='hr1', rshares_hr1=0, voting_time=None, global_params=
     # payout, pending = get_post_curator_payout(post)
 
     # if new_rshares == injected_rshares:
-    payout = new_rshares * global_params['RSHARES_TO_SBD']
+    payout = new_rshares * global_params['RSHARES_TO_SBD'] * 0.25
     # else:
     #     payout_increase = new_rshares / (new_rshares - injected_rshares)
     #     payout *= payout_increase
@@ -264,8 +278,18 @@ def get_ap(url):
     url = url.split('/')
     return url[-2][1:], url[-1]
 
+def get_identifier(memo):
+    ap = get_ap(memo)
+    return '/'.join(ap)
+
 def parse_timestamp(timestamp):
     return datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+
+def parse_vote_time(vote_time):
+    return datetime.strptime(vote_time, '%Y-%m-%dT%H:%M:%S')
+
+def get_post_payout(post):
+    return post['total_payout_value']['amount'] + post['pending_payout_value']['amount']
 
 ############ CHECKS_BID ################################################
 
@@ -325,3 +349,12 @@ def simulate_vote(bid_amount_sbd, total_payouts_sum, post, bid, global_params, s
                     return expected_reward, hrshares, bid_amount_sbd, True
 
     return simulation_df.loc[post['identifier']]
+
+
+def get_rshares_to_sbd():
+    steemd = steem_factory().steemd
+    reward_fund = steemd.get_reward_fund('post')
+    median_sbd_price = steemd.get_current_median_history_price()['base']
+    median_sbd_price = get_value(median_sbd_price)
+    RSHARES_TO_SBD = 1 / get_value(reward_fund['recent_claims']) * get_value(reward_fund['reward_balance']) * median_sbd_price
+    return RSHARES_TO_SBD, median_sbd_price

@@ -63,6 +63,7 @@ global_params = ['MULTIPLIER', 'MEDIAN_SBD_PRICE', 'TOTAL_PAYOUTS_SUM_SBD', 'VOT
 #     'postpromoter': [0, 49.999],
 #     'minnowbooster': [0.01, 1000], # Min: 0.01, Max: 13.35, Max-Whitelist: 22.62
 #     'brupvoter' : [0, 2.5],
+#     'smartsteem' : [0, 50],
 # }
 
 
@@ -83,9 +84,6 @@ def get_post_from_transfer(transfer):
 
     return get_post(post_id)
 
-
-def _parse_vote_time(vote_time):
-    return datetime.strptime(vote_time, '%Y-%m-%dT%H:%M:%S')
 
 ############ CHECKS_BID ################################################
 
